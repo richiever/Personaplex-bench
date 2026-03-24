@@ -663,9 +663,13 @@ def generation_eval_single(
         lm_gen.load_voice_prompt(voice_prompt_path)
 
     wrapped_prompt = wrap_with_system_tags(system_prompt) if system_prompt else ""
-    lm_gen.text_prompt_tokens = (
-        text_tokenizer.encode(wrapped_prompt) if wrapped_prompt else None
-    )
+    if wrapped_prompt:
+        lm_gen.text_prompt_tokens = text_tokenizer.encode(wrapped_prompt)
+    else:
+        # No system prompt available — use a minimal default so step_system_prompts doesn't crash
+        lm_gen.text_prompt_tokens = text_tokenizer.encode(
+            "<system> You are a customer at a coffee shop. <system>"
+        )
 
     # Reset and inject prompts
     mimi.reset_streaming()
