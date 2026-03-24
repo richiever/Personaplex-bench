@@ -629,9 +629,13 @@ def generation_eval_single(
             if step_out is None:
                 continue
             # Unpack: with return_logits=True, step returns (tokens, (text_logits, audio_logits))
-            tokens = step_out[0] if isinstance(step_out, tuple) else step_out
-            _ = mimi.decode(tokens[:, 1:9])
-            _ = other_mimi.decode(tokens[:, 1:9])
+            if isinstance(step_out, tuple):
+                tokens = step_out[0]
+            else:
+                tokens = step_out
+            if tokens is not None:
+                _ = mimi.decode(tokens[:, 1:9])
+                _ = other_mimi.decode(tokens[:, 1:9])
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
