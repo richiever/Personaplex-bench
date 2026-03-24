@@ -8,6 +8,15 @@ Look in `/workspace/benchmark_results/` (or the output directory) for `transcrip
 
 For each pending transcript, evaluate TWO things:
 
+### Reading the conversation
+
+Each transcript JSON now has a `conversation` object with both sides:
+- `conversation.user_barista_transcript` — what the barista (input audio) said
+- `conversation.agent_model_transcript` — what the model (output audio) said
+- `conversation.agent_text_tokens_decoded` — what the model's text stream produced (may differ from audio)
+
+Read these together to understand the full dialogue flow. The barista transcript gives context for what the model was responding to.
+
 ### 1. Role Inversion (critical failure)
 
 The model's system prompt tells it what role to play. Read the `system_prompt` field and the `transcription` field.

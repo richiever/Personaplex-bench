@@ -766,9 +766,10 @@ def generation_eval_single(
             ))
             step_count += 1
 
-    # Clean up temp file
+    # Save user (barista) audio instead of deleting — needed for conversation transcript
+    user_wav_path = output_dir / f"user_{pt_path.stem}_seed{seed}.wav"
     if temp_wav.exists():
-        temp_wav.unlink()
+        temp_wav.rename(user_wav_path)
 
     if not generated_frames:
         result.degenerate = True
@@ -823,12 +824,24 @@ def generation_eval_single(
     # I. RTF
     result.rtf = total_wall_time / max(audio_duration, 0.01)
 
-    # J. Whisper transcription
+    # J. Whisper transcription — both agent (model) and user (barista) channels
+    user_transcription = ""
     if whisper_model is not None:
+        # Agent (model output)
         w_result = whisper_transcribe(output_pcm, SAMPLE_RATE, whisper_model)
         result.transcription = w_result["text"]
         result.word_count = w_result["word_count"]
         result.domain_keywords_found = check_domain_keywords(w_result["text"])
+
+        # User (barista input) — transcribe the decoded user audio
+        if user_wav_path.exists():
+            try:
+                import sphn as _sphn
+                user_audio_for_whisper, _ = _sphn.read(str(user_wav_path))
+                u_result = whisper_transcribe(user_audio_for_whisper, SAMPLE_RATE, whisper_model)
+                user_transcription = u_result["text"]
+            except Exception as e:
+                print(f"  Warning: could not transcribe user audio: {e}")
 
         # K. Text-audio cross-validation
         result.text_audio_word_overlap = text_audio_cross_validation(
@@ -892,6 +905,11 @@ def generation_eval_single(
         "seed": seed,
         "system_prompt": system_prompt,
         "expected_role": result.expected_role,
+        "conversation": {
+            "user_barista_transcript": user_transcription,
+            "agent_model_transcript": result.transcription,
+            "agent_text_tokens_decoded": "",
+        },
         "transcription": result.transcription,
         "model_text_tokens_decoded": "",
         "role_adherence": result.role_adherence,
@@ -905,9 +923,9 @@ def generation_eval_single(
     non_pad = [t for t in generated_text_tokens if t not in (0, 3, -1)]
     if non_pad:
         try:
-            transcript_data["model_text_tokens_decoded"] = (
-                text_tokenizer.decode(non_pad).replace("\u2581", " ").strip()
-            )
+            decoded_text = text_tokenizer.decode(non_pad).replace("\u2581", " ").strip()
+            transcript_data["model_text_tokens_decoded"] = decoded_text
+            transcript_data["conversation"]["agent_text_tokens_decoded"] = decoded_text
         except Exception:
             pass
     with open(transcript_path, "w") as f:
