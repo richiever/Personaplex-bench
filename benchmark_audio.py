@@ -917,6 +917,11 @@ def generation_eval_single(
         "degenerate": result.degenerate,
         "degenerate_reasons": result.degenerate_reasons,
         "segment_verdicts": result.segment_verdicts,
+        "audio_tokens": {
+            "semantic_cb0": [fr.audio_tokens[0] for fr in frame_records if fr.audio_tokens],
+            "all_codebooks": [[fr.text_token] + fr.audio_tokens for fr in frame_records if fr.audio_tokens],
+            "text_token_ids": generated_text_tokens,
+        },
         "judge_verdict": "pending",
     }
     # Decode model text tokens for judge review
