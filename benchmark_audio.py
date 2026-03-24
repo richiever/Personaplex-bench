@@ -99,6 +99,19 @@ class GenerationSampleResult:
     rtf: float = 0.0
     degenerate: bool = False
     degenerate_reasons: list = field(default_factory=list)
+    # Role adherence (lightweight phrase-based check)
+    expected_role: str = ""
+    role_adherence: bool = True
+    role_inversion_phrases: list = field(default_factory=list)
+    # Artifact paths (for cron judge to review)
+    output_wav_path: str = ""
+    output_transcript_path: str = ""
+    diagnostic_png_path: str = ""
+    # Per-segment degeneration tracking
+    segment_verdicts: list = field(default_factory=list)
+    # LLM judge verdict (filled by judge_cron.py, not by benchmark)
+    judge_verdict: str = ""  # "pending", "keep", "discard"
+    judge_reason: str = ""
     pass_all: bool = False
 
 
@@ -368,6 +381,124 @@ def check_domain_keywords(text: str) -> list[str]:
     """Return domain keywords found in the transcript."""
     words = set(text.lower().split())
     return sorted(words & DOMAIN_KEYWORDS)
+
+
+# ---------------------------------------------------------------------------
+# Role adherence detection
+# ---------------------------------------------------------------------------
+
+# Phrases that indicate the model is acting as a BARISTA (wrong if system prompt says customer)
+BARISTA_PHRASES = [
+    "what can i get", "what would you like", "can i get you", "here's your",
+    "your total is", "that'll be", "coming right up", "anything else",
+    "for here or to go", "what size", "can i help you", "welcome to",
+    "we have", "our special", "let me make", "would you like to try",
+    "i'll get that started", "your order", "here you go",
+]
+
+# Phrases that indicate the model is acting as a CUSTOMER (wrong if system prompt says barista)
+CUSTOMER_PHRASES = [
+    "i'd like", "i'll have", "can i get", "i want", "i need",
+    "do you have", "what's in", "how much is", "i'm looking for",
+    "i ordered", "that's not what i", "i asked for", "where's my",
+    "i've been waiting", "this isn't right", "i'm in a hurry",
+]
+
+
+def parse_expected_role(system_prompt: str) -> str:
+    """Determine what role the model should play from the system prompt."""
+    prompt_lower = system_prompt.lower()
+    # PersonaPlex: AGENT = CUSTOMER, USER = BARISTA
+    # System prompts describe the customer persona
+    if any(w in prompt_lower for w in ["you are", "you're"]):
+        if any(w in prompt_lower for w in ["customer", "patron", "client", "shopper", "commuter", "regular"]):
+            return "customer"
+        if any(w in prompt_lower for w in ["barista", "server", "cashier", "employee", "worker"]):
+            return "barista"
+    # Default for PersonaPlex: model is always the customer
+    if "customer" in prompt_lower or "agent" in prompt_lower:
+        return "customer"
+    return "customer"  # safe default for this project
+
+
+def check_role_adherence(transcript: str, expected_role: str) -> dict:
+    """Check if the transcript matches the expected role or shows inversion."""
+    transcript_lower = transcript.lower()
+    wrong_phrases = []
+
+    if expected_role == "customer":
+        # Model should be customer — flag barista phrases
+        for phrase in BARISTA_PHRASES:
+            if phrase in transcript_lower:
+                wrong_phrases.append(phrase)
+    elif expected_role == "barista":
+        # Model should be barista — flag customer phrases
+        for phrase in CUSTOMER_PHRASES:
+            if phrase in transcript_lower:
+                wrong_phrases.append(phrase)
+
+    return {
+        "adherence": len(wrong_phrases) == 0,
+        "wrong_phrases": wrong_phrases,
+    }
+
+
+def segment_degeneration_analysis(
+    frame_records: list, audio: np.ndarray, sr: int, segment_duration_s: float = 5.0
+) -> list[dict]:
+    """Analyze degeneration per time segment. Returns per-segment verdicts."""
+    librosa = _import_librosa()
+    total_duration = len(audio) / sr
+    segments = []
+    segment_frames = int(segment_duration_s * FRAME_RATE)
+    segment_samples = int(segment_duration_s * sr)
+
+    for seg_idx in range(0, max(1, int(total_duration / segment_duration_s))):
+        t_start = seg_idx * segment_duration_s
+        t_end = min(t_start + segment_duration_s, total_duration)
+        sample_start = int(t_start * sr)
+        sample_end = min(int(t_end * sr), len(audio))
+        frame_start = int(t_start * FRAME_RATE)
+        frame_end = min(int(t_end * FRAME_RATE), len(frame_records))
+
+        seg_audio = audio[sample_start:sample_end]
+        seg_frames = frame_records[frame_start:frame_end]
+
+        if len(seg_audio) < sr * 0.5:  # skip very short tail segments
+            continue
+
+        # Spectral flatness for this segment
+        flatness = librosa.feature.spectral_flatness(y=seg_audio, hop_length=512)[0]
+        mean_flat = float(np.mean(flatness)) if len(flatness) > 0 else 0.0
+
+        # Entropy for this segment
+        entropies = [fr.audio_entropy_cb0 for fr in seg_frames]
+        mean_ent = float(np.mean(entropies)) if entropies else 0.0
+
+        # Pad ratio for this segment
+        pad_count = sum(1 for fr in seg_frames if fr.is_pad)
+        pad_ratio = pad_count / max(len(seg_frames), 1)
+
+        issues = []
+        if mean_flat > 0.2:
+            issues.append("whooshing")
+        if mean_ent < 2.5 and entropies:
+            issues.append("low_entropy")
+        if pad_ratio > 0.9:
+            issues.append("mostly_silent")
+
+        verdict = "ok" if not issues else "degraded"
+
+        segments.append({
+            "time_s": f"{t_start:.1f}-{t_end:.1f}",
+            "verdict": verdict,
+            "spectral_flatness": round(mean_flat, 4),
+            "entropy_mean": round(mean_ent, 2),
+            "pad_ratio": round(pad_ratio, 3),
+            "issues": issues,
+        })
+
+    return segments
 
 
 def text_audio_cross_validation(
@@ -652,6 +783,18 @@ def generation_eval_single(
             generated_text_tokens, w_result["text"], text_tokenizer
         )
 
+    # L. Role adherence
+    result.expected_role = parse_expected_role(system_prompt)
+    if result.transcription:
+        role_check = check_role_adherence(result.transcription, result.expected_role)
+        result.role_adherence = role_check["adherence"]
+        result.role_inversion_phrases = role_check["wrong_phrases"]
+
+    # M. Per-segment degeneration
+    result.segment_verdicts = segment_degeneration_analysis(
+        frame_records, output_pcm, SAMPLE_RATE
+    )
+
     # --- Degenerate checks ---
     reasons = []
     if result.spectral_flatness_mean >= 0.15:
@@ -668,34 +811,68 @@ def generation_eval_single(
         reasons.append(f"zcr_out_of_range={result.zcr_mean:.3f}")
     if result.energy_cv < 0.1:
         reasons.append(f"flat_energy_cv={result.energy_cv:.3f}")
+    if not result.role_adherence:
+        reasons.append(f"role_inversion={','.join(result.role_inversion_phrases[:3])}")
 
     result.degenerate = len(reasons) > 0
     result.degenerate_reasons = reasons
 
     # --- Pass/fail ---
     whisper_pass = result.word_count >= 5
-    domain_pass = len(result.domain_keywords_found) >= 1
     latency_pass = result.response_latency_s < 5.0
     silence_pass = result.silence_ratio < 0.95
-    continuity_pass = result.speech_segments >= 2 and result.longest_speech_s > 2.0
 
     result.pass_all = (
         not result.degenerate
         and whisper_pass
         and latency_pass
         and silence_pass
+        and result.role_adherence
     )
 
-    # Save diagnostic spectrogram if failed
-    if not result.pass_all:
-        spec_path = output_dir / f"diag_{pt_path.stem}_seed{seed}.png"
+    # --- Save artifacts for cron judge ---
+    result.output_wav_path = str(out_wav)
+
+    # Save transcript file
+    transcript_path = output_dir / f"transcript_{pt_path.stem}_seed{seed}.json"
+    transcript_data = {
+        "file": pt_path.name,
+        "seed": seed,
+        "system_prompt": system_prompt,
+        "expected_role": result.expected_role,
+        "transcription": result.transcription,
+        "model_text_tokens_decoded": "",
+        "role_adherence": result.role_adherence,
+        "role_inversion_phrases": result.role_inversion_phrases,
+        "degenerate": result.degenerate,
+        "degenerate_reasons": result.degenerate_reasons,
+        "segment_verdicts": result.segment_verdicts,
+        "judge_verdict": "pending",
+    }
+    # Decode model text tokens for judge review
+    non_pad = [t for t in generated_text_tokens if t not in (0, 3, -1)]
+    if non_pad:
         try:
-            save_diagnostic_spectrogram(
-                output_pcm, SAMPLE_RATE, str(spec_path),
-                f"{pt_path.stem} (FAILED: {', '.join(reasons[:3])})"
+            transcript_data["model_text_tokens_decoded"] = (
+                text_tokenizer.decode(non_pad).replace("\u2581", " ").strip()
             )
-        except Exception as e:
-            print(f"  Warning: could not save spectrogram: {e}")
+        except Exception:
+            pass
+    with open(transcript_path, "w") as f:
+        json.dump(transcript_data, f, indent=2, default=str)
+    result.output_transcript_path = str(transcript_path)
+
+    # Save diagnostic spectrogram (always, not just on failure — useful for judge)
+    spec_path = output_dir / f"diag_{pt_path.stem}_seed{seed}.png"
+    try:
+        status = "FAIL" if not result.pass_all else "PASS"
+        save_diagnostic_spectrogram(
+            output_pcm, SAMPLE_RATE, str(spec_path),
+            f"{pt_path.stem} ({status})"
+        )
+        result.diagnostic_png_path = str(spec_path)
+    except Exception as e:
+        print(f"  Warning: could not save spectrogram: {e}")
 
     return result
 
@@ -726,22 +903,25 @@ def compute_composite_score(
         no_degen_rate = np.mean([0.0 if r.degenerate else 1.0 for r in gen_results])
         latency_pass_rate = np.mean([1.0 if r.response_latency_s < 5.0 else 0.0 for r in gen_results])
         crossval_rate = np.mean([1.0 if r.text_audio_word_overlap >= 0.2 else 0.0 for r in gen_results])
+        role_adherence_rate = np.mean([1.0 if r.role_adherence else 0.0 for r in gen_results])
     else:
         avg_utmos = 0.0
         whisper_pass_rate = 0.0
         no_degen_rate = 0.0
         latency_pass_rate = 0.0
         crossval_rate = 0.0
+        role_adherence_rate = 0.0
 
     score = (
-        15 * max(0.0, min(1.0, 1.0 - avg_text_loss / 10.0))
-        + 15 * avg_text_acc
-        + 10 * max(0.0, min(1.0, 1.0 - avg_sem_loss / 10.0))
-        + 15 * min(avg_utmos / 5.0, 1.0)
-        + 10 * whisper_pass_rate
-        + 15 * no_degen_rate
-        + 10 * latency_pass_rate
-        + 10 * crossval_rate
+        10 * max(0.0, min(1.0, 1.0 - avg_text_loss / 10.0))  # 10 pts: token prediction
+        + 10 * avg_text_acc                                     # 10 pts: text accuracy
+        + 10 * max(0.0, min(1.0, 1.0 - avg_sem_loss / 10.0))  # 10 pts: semantic prediction
+        + 10 * min(avg_utmos / 5.0, 1.0)                       # 10 pts: audio quality
+        + 10 * whisper_pass_rate                                # 10 pts: coherent speech
+        + 15 * no_degen_rate                                    # 15 pts: no degenerate audio
+        + 10 * latency_pass_rate                                # 10 pts: responsive
+        + 10 * crossval_rate                                    # 10 pts: text-audio alignment
+        + 15 * role_adherence_rate                              # 15 pts: stays in character
     )
     return float(score)
 
@@ -973,12 +1153,20 @@ def main():
             print(f"  Result: {status}")
             if sample_result.transcription:
                 print(f"  Transcription: {sample_result.transcription[:120]}...")
+            print(f"  Role: expected={sample_result.expected_role} "
+                  f"adherence={'OK' if sample_result.role_adherence else 'INVERTED'}")
+            if sample_result.role_inversion_phrases:
+                print(f"  Wrong-role phrases: {sample_result.role_inversion_phrases}")
             if sample_result.degenerate_reasons:
                 print(f"  Degenerate: {', '.join(sample_result.degenerate_reasons)}")
+            degraded_segs = [s for s in sample_result.segment_verdicts if s["verdict"] == "degraded"]
+            if degraded_segs:
+                print(f"  Degraded segments: {[s['time_s'] for s in degraded_segs]}")
             print(f"  Metrics: flatness={sample_result.spectral_flatness_mean:.3f} "
                   f"entropy={sample_result.token_entropy_mean:.2f} "
                   f"latency={sample_result.response_latency_s:.1f}s "
                   f"rtf={sample_result.rtf:.2f}")
+            print(f"  Artifacts: {sample_result.output_transcript_path}")
 
     total_time = time.time() - t_start
 
@@ -1020,6 +1208,8 @@ def main():
                 "mean_entropy": round(np.mean([r.token_entropy_mean for r in gen_results]), 2),
                 "pass_rate": f"{sum(1 for r in gen_results if r.pass_all)}/{len(gen_results)}",
                 "degenerate_count": sum(1 for r in gen_results if r.degenerate),
+                "role_inversion_count": sum(1 for r in gen_results if not r.role_adherence),
+                "pending_judge_review": sum(1 for r in gen_results if r.output_transcript_path),
             },
         }
 
