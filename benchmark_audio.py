@@ -592,6 +592,7 @@ def generation_eval_single(
     text_tokenizer,
     whisper_model,
     voice_prompt_path: str,
+    user_voice_prompt_path: str,
     device: str,
     output_dir: Path,
     skip_utmos: bool = False,
@@ -675,11 +676,20 @@ def generation_eval_single(
             "<system> You are a customer at a coffee shop. <system>"
         )
 
+    # Load user voice prompt (barista greeting) if provided
+    if user_voice_prompt_path:
+        lm_gen.load_user_voice_prompt(user_voice_prompt_path)
+
     # Reset and inject prompts
     mimi.reset_streaming()
     other_mimi.reset_streaming()
     lm_gen.reset_streaming()
     lm_gen.step_system_prompts(mimi)
+    # Step user voice prompt (barista greeting) after system prompts
+    if user_voice_prompt_path and hasattr(lm_gen, '_step_user_voice_prompt_core'):
+        for _ in lm_gen._step_user_voice_prompt_core(mimi):
+            pass
+        lm_gen._step_audio_silence()
     mimi.reset_streaming()
 
     # Decode user audio from .pt tokens → PCM
@@ -1035,7 +1045,9 @@ def main():
     parser.add_argument("--eval-files", nargs="+", default=["test_001.pt"],
                         help="Eval .pt filenames")
     parser.add_argument("--voice-prompt", type=str, default=None,
-                        help="Voice prompt (.pt or .wav) for generation eval")
+                        help="Voice prompt (.pt or .wav) for agent voice conditioning")
+    parser.add_argument("--user-voice-prompt", type=str, default=None,
+                        help="User voice prompt (.pt or .wav) — barista greeting injected before conversation")
     parser.add_argument("--training-json", type=str, nargs="*", default=[],
                         help="Path(s) to training.json for system prompt lookup")
     parser.add_argument("--default-prompt", type=str, default="",
@@ -1188,6 +1200,7 @@ def main():
                 text_tokenizer=text_tokenizer,
                 whisper_model=whisper_model,
                 voice_prompt_path=voice_prompt_path,
+                user_voice_prompt_path=args.user_voice_prompt,
                 device=device,
                 output_dir=output_dir,
                 skip_utmos=args.skip_utmos,
