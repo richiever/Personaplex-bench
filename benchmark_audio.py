@@ -619,8 +619,21 @@ def generation_eval_single(
     other_mimi.streaming_forever(1)
     lm_gen.streaming_forever(1)
 
-    # Warmup
-    warmup(mimi, other_mimi, lm_gen, device, frame_size)
+    # Warmup (custom — handles return_logits=True where step() returns tuples)
+    for _ in range(4):
+        chunk = torch.zeros(1, 1, frame_size, dtype=torch.float32, device=device)
+        enc_codes = mimi.encode(chunk)
+        _ = other_mimi.encode(chunk)
+        for c in range(enc_codes.shape[-1]):
+            step_out = lm_gen.step(enc_codes[:, :, c:c + 1])
+            if step_out is None:
+                continue
+            # Unpack: with return_logits=True, step returns (tokens, (text_logits, audio_logits))
+            tokens = step_out[0] if isinstance(step_out, tuple) else step_out
+            _ = mimi.decode(tokens[:, 1:9])
+            _ = other_mimi.decode(tokens[:, 1:9])
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     # Set system prompt
     if voice_prompt_path and voice_prompt_path.endswith(".pt"):
