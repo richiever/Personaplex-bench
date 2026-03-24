@@ -542,21 +542,38 @@ def load_prompt_lookup(training_json_paths: list[Path]) -> dict[str, str]:
     return lookup
 
 
-def recover_system_prompt(codes: torch.Tensor, tokenizer, prompt_lookup: dict, pt_name: str) -> str:
+def recover_system_prompt(
+    codes: torch.Tensor, tokenizer, prompt_lookup: dict, pt_name: str,
+    default_prompt: str = "",
+) -> str:
     """Get system prompt for a .pt file, from lookup or by parsing tokens."""
     # Try lookup first
     conv_id = Path(pt_name).stem
     if conv_id in prompt_lookup:
         return prompt_lookup[conv_id]
 
-    # Fallback: parse text tokens from row 0
+    # Fallback: decode ALL text tokens from row 0, look for <system>...</system> tags
     text_row = codes[0].tolist()
-    prompt_tokens = [t for t in text_row[:50] if t not in (-1, 0, PAD_TOKEN)]
-    if prompt_tokens:
+    all_tokens = [t for t in text_row if t not in (-1, 0, PAD_TOKEN)]
+    if all_tokens:
         try:
-            return tokenizer.decode(prompt_tokens)
+            full_text = tokenizer.decode(all_tokens).replace("\u2581", " ").strip()
+            # Extract system prompt between <system> tags
+            if "<system>" in full_text:
+                parts = full_text.split("<system>")
+                # Format is: <system> prompt text <system> conversation...
+                # After split: ['', ' prompt text ', ' conversation...']
+                for part in parts[1:]:  # skip empty first element
+                    candidate = part.strip()
+                    if candidate and len(candidate) > 10:
+                        return f"<system> {candidate} <system>"
         except Exception:
             pass
+
+    # Use default prompt if provided
+    if default_prompt:
+        return default_prompt
+
     return ""
 
 
@@ -1013,6 +1030,8 @@ def main():
                         help="Voice prompt (.pt or .wav) for generation eval")
     parser.add_argument("--training-json", type=str, nargs="*", default=[],
                         help="Path(s) to training.json for system prompt lookup")
+    parser.add_argument("--default-prompt", type=str, default="",
+                        help="Default system prompt for eval files not found in training.json")
     parser.add_argument("--output-dir", type=str, default="./benchmark_results")
     parser.add_argument("--output-json", type=str, default=None,
                         help="Override output JSON path")
@@ -1144,7 +1163,8 @@ def main():
         for pt_path in eval_files:
             system_prompt = recover_system_prompt(
                 torch.load(pt_path, weights_only=True),
-                text_tokenizer, prompt_lookup, pt_path.name
+                text_tokenizer, prompt_lookup, pt_path.name,
+                default_prompt=args.default_prompt,
             )
             print(f"\n  Evaluating: {pt_path.name}")
             print(f"  System prompt: {system_prompt[:100]}...")
