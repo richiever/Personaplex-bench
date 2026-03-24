@@ -617,8 +617,8 @@ def generation_eval_single(
 
     # --- Construct LMGen with return_logits=True ---
     frame_size = int(mimi.sample_rate / mimi.frame_rate)
-    lm_gen = LMGen(
-        lm,
+    # Build kwargs — text_tokenizer may not be accepted depending on the moshi version
+    lm_gen_kwargs = dict(
         audio_silence_frame_cnt=int(0.5 * mimi.frame_rate),
         sample_rate=mimi.sample_rate,
         device=device,
@@ -629,8 +629,12 @@ def generation_eval_single(
         top_k=250,
         top_k_text=25,
         return_logits=True,
-        text_tokenizer=text_tokenizer,
     )
+    # Only pass text_tokenizer if the LMGen constructor accepts it
+    import inspect
+    if "text_tokenizer" in inspect.signature(LMGen.__init__).parameters:
+        lm_gen_kwargs["text_tokenizer"] = text_tokenizer
+    lm_gen = LMGen(lm, **lm_gen_kwargs)
 
     mimi.streaming_forever(1)
     other_mimi.streaming_forever(1)
