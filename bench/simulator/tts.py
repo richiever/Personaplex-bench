@@ -44,16 +44,33 @@ class F5TTSClient:
         return p
 
     def synthesize(self, text: str, ref_voice_wav: str | Path,
-                   ref_text: str = "") -> Tuple[np.ndarray, int]:
-        tts = self._lazy()
+                   ref_text: str = "", max_chars: int = 220) -> Tuple[np.ndarray, int]:
+        # F5-TTS's ODE solver occasionally errors on long / awkward inputs and
+        # leaves the model in a corrupted state that breaks subsequent calls.
+        # Clamp length, and on any exception recreate the F5TTS instance and
+        # retry once with even shorter text.
+        safe_text = text.strip()
+        if len(safe_text) > max_chars:
+            cut = safe_text[:max_chars]
+            end = max(cut.rfind(". "), cut.rfind("? "), cut.rfind("! "))
+            safe_text = (cut[:end + 1] if end > 40 else cut).rstrip()
         ref_path = self._resolve_ref(ref_voice_wav)
-        wav, sr, _ = tts.infer(
-            ref_file=str(ref_path),
-            ref_text=ref_text,
-            gen_text=text,
-            remove_silence=True,
-            speed=1.0,
-        )
+
+        def _run(payload: str):
+            tts = self._lazy()
+            return tts.infer(ref_file=str(ref_path), ref_text=ref_text,
+                             gen_text=payload, remove_silence=True, speed=1.0)
+
+        try:
+            wav, sr, _ = _run(safe_text)
+        except Exception:
+            # Reset the F5-TTS singleton to clear any corrupted state.
+            self._tts = None
+            short = safe_text[:120]
+            end = max(short.rfind(". "), short.rfind("? "), short.rfind("! "))
+            short = short[:end + 1] if end > 30 else short
+            short = short.rstrip() or "Okay."
+            wav, sr, _ = _run(short)
         arr = np.asarray(wav, dtype=np.float32)
         if arr.ndim > 1:
             arr = arr.mean(axis=0)

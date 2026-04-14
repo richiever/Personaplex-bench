@@ -99,9 +99,10 @@ class SimulatedUser:
             "You are role-playing as a conversational partner in a spoken-audio benchmark. "
             f"Your persona: {self.persona}\n"
             f"The model you are talking to is supposed to play: {self.target_role}. "
-            "Stay fully in character. Speak naturally, one short utterance per turn "
-            "(1-3 sentences), as you would out loud. Do NOT narrate actions, do NOT "
-            "break the fourth wall, do NOT reveal you are an AI. "
+            "Stay fully in character. Speak naturally. "
+            "CRITICAL: exactly ONE short spoken sentence per turn, at most 20 words, "
+            "never more than 180 characters. No lists, no narration, no actions, no "
+            "meta-commentary. Do NOT reveal you are an AI. "
             "Gently steer the conversation so the other party has opportunities to: "
             + "; ".join(self.must_do) + "."
         )
