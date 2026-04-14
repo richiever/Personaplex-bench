@@ -1,0 +1,1 @@
+{"id": "smoke_echo_0001", "system_prompt_for_target": "You are a customer.", "user_persona": "Worker.", "user_voice_ref_wav": "voices/worker_1.wav", "opening_utterance": "Hello, this is a smoke test.", "turns": 1, "rubric": {"target_role": "customer", "must_do": ["respond"], "red_flags": []}}

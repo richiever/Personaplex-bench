@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.Python
+_bench.tar.gz
+results*/
+voices/*.wav
+!voices/README.md
+.DS_Store
+*.log
+.ipynb_checkpoints/
